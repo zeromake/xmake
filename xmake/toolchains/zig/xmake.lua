@@ -131,13 +131,16 @@ toolchain("zig")
             toolchain:add("zcldflags", "-lkernel32", "-lntdll")
         elseif toolchain:is_plat("macosx", "iphoneos") then
             local xcode_sysroot = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
-            toolchain:add("cxflags", "-isysroot", xcode_sysroot)
-            toolchain:add("asflags", "-isysroot", xcode_sysroot)
-            toolchain:add("ldflags", "-isysroot", xcode_sysroot)
-            toolchain:add("shflags", "-isysroot", xcode_sysroot)
-            toolchain:add("mxflags", "-isysroot", xcode_sysroot)
-            toolchain:add("scflags", "-sdk " .. xcode_sysroot)
-            toolchain:add("scshflags", "-sdk " .. xcode_sysroot)
-            toolchain:add("scldflags", "-sdk " .. xcode_sysroot)
+            local xcode_framework = xcode_sysroot .. "/System/Library/Frameworks"
+            local xcode_include = xcode_sysroot .. "/usr/include"
+            toolchain:add("zig_cc.cxflags", "-isysroot", xcode_sysroot, "-F"..xcode_framework, "-I"..xcode_include)
+            toolchain:add("zig_cc.ldflags", "-isysroot", xcode_sysroot, "-F"..xcode_framework, "-I"..xcode_include)
+            toolchain:add("zig_cc.shflags", "-isysroot", xcode_sysroot, "-F"..xcode_framework, "-I"..xcode_include)
+            toolchain:add("zig_cxx.cxflags", "-isysroot", xcode_sysroot, "-F"..xcode_framework, "-I"..xcode_include)
+            toolchain:add("zig_cxx.ldflags", "-isysroot", xcode_sysroot, "-F"..xcode_framework, "-I"..xcode_include)
+            toolchain:add("zig_cxx.shflags", "-isysroot", xcode_sysroot, "-F"..xcode_framework, "-I"..xcode_include)
+            toolchain:add("zcflags", "-sdk " .. xcode_sysroot)
+            toolchain:add("zcldflags", "-sdk " .. xcode_sysroot)
+            toolchain:add("zcshflags", "-sdk " .. xcode_sysroot)
         end
     end)
