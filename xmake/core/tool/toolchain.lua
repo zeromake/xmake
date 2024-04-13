@@ -156,6 +156,12 @@ function _instance:kind()
     return self:info():get("kind")
 end
 
+-- get toolchain formats, we must set it in description scope
+-- @see https://github.com/xmake-io/xmake/issues/4769
+function _instance:formats()
+    return self:info():get("formats")
+end
+
 -- is cross-compilation toolchain?
 function _instance:is_cross()
     if self:kind() == "cross" then
@@ -382,6 +388,8 @@ function _instance:_description(toolkind)
             ar         = "the static library archiver",
             mrc        = "the windows resource compiler",
             strip      = "the symbols stripper",
+            ranlib     = "the archive index generator",
+            objcopy    = "the GNU objcopy utility",
             dsymutil   = "the symbols generator",
             mm         = "the objc compiler",
             mxx        = "the objc++ compiler",

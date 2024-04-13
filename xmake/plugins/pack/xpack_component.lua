@@ -23,6 +23,8 @@ import("core.base.object")
 import("core.base.option")
 import("core.project.config")
 import("core.project.project")
+import("private.core.base.select_script")
+import("private.core.base.match_copyfiles")
 
 -- define module
 local xpack_component = xpack_component or object {_init = {"_name", "_info", "_package"}}
@@ -72,51 +74,9 @@ end
 
 -- get xxx_script
 function xpack_component:script(name, generic)
-
-    -- get script
     local script = self:get(name)
-    local result = nil
-    if type(script) == "function" then
-        result = script
-    elseif type(script) == "table" then
-
-        -- get plat and arch
-        local plat = self:plat()
-        local arch = self:arch()
-
-        -- match pattern
-        --
-        -- `@linux`
-        -- `@linux|x86_64`
-        -- `@macosx,linux`
-        -- `android@macosx,linux`
-        -- `android|armeabi-v7a@macosx,linux`
-        -- `android|armeabi-v7a@macosx,linux|x86_64`
-        -- `android|armeabi-v7a@linux|x86_64`
-        --
-        for _pattern, _script in pairs(script) do
-            local hosts = {}
-            local hosts_spec = false
-            _pattern = _pattern:gsub("@(.+)", function (v)
-                for _, host in ipairs(v:split(',')) do
-                    hosts[host] = true
-                    hosts_spec = true
-                end
-                return ""
-            end)
-            if not _pattern:startswith("__") and (not hosts_spec or hosts[os.subhost() .. '|' .. os.subarch()] or hosts[os.subhost()])
-            and (_pattern:trim() == "" or (plat .. '|' .. arch):find('^' .. _pattern .. '$') or plat:find('^' .. _pattern .. '$')) then
-                result = _script
-                break
-            end
-        end
-
-        -- get generic script
-        result = result or script["__generic__"] or generic
-    end
-
-    -- only generic script
-    return result or generic
+    local result = select_script(script, {plat = self:package():plat(), arch = self:package():arch()}) or generic
+    return result
 end
 
 -- get targets
@@ -148,88 +108,6 @@ function xpack_component:target(name)
     end
 end
 
--- get the copied files
-function xpack_component:_copiedfiles(filetype, outputdir)
-
-    -- no copied files?
-    local copiedfiles = self:get(filetype)
-    if not copiedfiles then return end
-
-    -- get the extra information
-    local extrainfo = table.wrap(self:get("__extra_" .. filetype))
-
-    -- get the source paths and destinate paths
-    local srcfiles = {}
-    local dstfiles = {}
-    local fileinfos = {}
-    for _, copiedfile in ipairs(table.wrap(copiedfiles)) do
-
-        -- get the root directory
-        local rootdir, count = copiedfile:gsub("|.*$", ""):gsub("%(.*%)$", "")
-        if count == 0 then
-            rootdir = nil
-        end
-        if rootdir and rootdir:trim() == "" then
-            rootdir = "."
-        end
-
-        -- remove '(' and ')'
-        local srcpaths = copiedfile:gsub("[%(%)]", "")
-        if srcpaths then
-
-            -- get the source paths
-            srcpaths = os.match(srcpaths)
-            if srcpaths and #srcpaths > 0 then
-
-                -- add the source copied files
-                table.join2(srcfiles, srcpaths)
-
-                -- the copied directory exists?
-                if outputdir then
-
-                    -- get the file info
-                    local fileinfo = extrainfo[copiedfile] or {}
-
-                    -- get the prefix directory
-                    local prefixdir = fileinfo.prefixdir
-                    if fileinfo.rootdir then
-                        rootdir = fileinfo.rootdir
-                    end
-
-                    -- add the destinate copied files
-                    for _, srcpath in ipairs(srcpaths) do
-
-                        -- get the destinate directory
-                        local dstdir = outputdir
-                        if prefixdir then
-                            dstdir = path.join(dstdir, prefixdir)
-                        end
-
-                        -- the destinate file
-                        local dstfile = nil
-                        if rootdir then
-                            dstfile = path.absolute(path.relative(srcpath, rootdir), dstdir)
-                        else
-                            dstfile = path.join(dstdir, path.filename(srcpath))
-                        end
-                        assert(dstfile)
-
-                        -- modify filename
-                        if fileinfo.filename then
-                            dstfile = path.join(path.directory(dstfile), fileinfo.filename)
-                        end
-
-                        -- add it
-                        table.insert(dstfiles, dstfile)
-                        table.insert(fileinfos, fileinfo)
-                    end
-                end
-            end
-        end
-    end
-    return srcfiles, dstfiles, fileinfos
-end
-
 -- get the package
 function xpack_component:package()
     return self._package
@@ -237,7 +115,7 @@ end
 
 -- get the install files
 function xpack_component:installfiles()
-    return self:_copiedfiles("installfiles", self:package():installdir())
+    return match_copyfiles(self, "installfiles", self:package():installdir())
 end
 
 -- get the installed root directory, this is just a temporary sandbox installation path,
@@ -253,7 +131,7 @@ end
 
 -- get the source files
 function xpack_component:sourcefiles()
-    return self:_copiedfiles("sourcefiles", self:package():sourcedir())
+    return match_copyfiles(self, "sourcefiles", self:package():sourcedir())
 end
 
 -- get the source root directory

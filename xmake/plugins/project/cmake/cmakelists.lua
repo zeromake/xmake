@@ -31,16 +31,43 @@ import("private.utils.batchcmds")
 import("private.utils.rule_groups")
 import("private.utils.target", {alias = "target_utils"})
 import("plugins.project.utils.target_cmds", {rootdir = os.programdir()})
+import("rules.c++.modules.modules_support.compiler_support", {alias = "module_compiler_support", rootdir = os.programdir()})
+
+-- get cmake version
+function _get_cmake_version()
+    local cmake_version = _g.cmake_version
+    if not cmake_version then
+        local cmake = find_tool("cmake", {version = true})
+        if cmake and cmake.version then
+            cmake_version = semver.new(cmake.version)
+        end
+        _g.cmake_version = cmake_version
+    end
+    return cmake_version
+end
+
+-- has c++ modules sources
+function _has_cxxmodules_sources()
+    for _, target in ipairs(project.ordertargets()) do
+        if module_compiler_support.contains_modules(target) then
+            return true
+        end
+    end
+end
 
 -- get minimal cmake version
 function _get_cmake_minver()
     local cmake_minver = _g.cmake_minver
     if not cmake_minver then
-        local cmake = find_tool("cmake", {version = true})
-        if cmake and cmake.version then
-            cmake_minver = semver.new(cmake.version)
+        cmake_minver = _get_cmake_version()
+        if cmake_minver then
+            if _has_cxxmodules_sources() and cmake_minver:gt("3.28.0") then
+                cmake_minver = semver.new("3.28.0")
+            elseif cmake_minver:gt("3.15.0") then
+                cmake_minver = semver.new("3.15.0")
+            end
         end
-        if not cmake_minver or cmake_minver:gt("3.15.0") then
+        if not cmake_minver then
             cmake_minver = semver.new("3.15.0")
         end
         _g.cmake_minver = cmake_minver
@@ -67,7 +94,8 @@ end
 -- escape path
 function _escape_path(filepath)
     if is_host("windows") then
-        filepath = filepath:gsub('\\', '/')
+        filepath = path.unix(filepath)
+        filepath = filepath:gsub(' ', '\\ ')
     end
     return filepath
 end
@@ -95,17 +123,17 @@ end
 -- @see https://github.com/xmake-io/xmake/issues/2026
 function _get_relative_unix_path_to_cmake(filepath, outputdir)
     filepath = _translate_path(filepath, outputdir)
-    filepath = path.translate(filepath):gsub('\\', '/')
+    filepath = path.unix(path.translate(filepath))
     if filepath and not path.is_absolute(filepath) then
         filepath = "${CMAKE_SOURCE_DIR}/" .. filepath
     end
     return os.args(filepath)
 end
 
--- get enabled languages from targets
-function _get_project_languages(targets)
+-- get enabled languages
+function _get_project_languages()
     local languages = {}
-    for _, target in table.orderpairs(targets) do
+    for _, target in ipairs(project.ordertargets()) do
         for _, sourcekind in ipairs(target:sourcekinds()) do
             if     sourcekind == "cc"  then table.insert(languages, "C")
             elseif sourcekind == "cxx" then table.insert(languages, "CXX")
@@ -133,16 +161,34 @@ function _get_configs_from_target(target, name)
     return table.unique(values)
 end
 
+-- Did the current cmake native support for c++ modules?
+function _can_native_support_for_cxxmodules()
+    local cmake_minver = _get_cmake_minver()
+    if cmake_minver and cmake_minver:ge("3.28") then
+        return true
+    end
+end
+
 -- this sourcebatch is built?
 function _sourcebatch_is_built(sourcebatch)
     -- we can only use rulename to filter them because sourcekind may be bound to multiple rules
     local rulename = sourcebatch.rulename
-    if rulename == "c.build" or rulename == "c++.build" or rulename == "c++.build.modules"
+    if rulename == "c.build" or rulename == "c++.build"
         or rulename == "asm.build" or rulename == "cuda.build"
         or rulename == "objc.build" or rulename == "objc++.build"
         or rulename == "win.sdk.resource" then
         return true
     end
+    if _can_native_support_for_cxxmodules() then
+        if rulename == "c++.build.modules" then
+            return true
+        end
+    end
+end
+
+-- get c++ modules rules
+function _get_cxxmodules_rules()
+    return {"c++.build.modules", "c++.build.modules.builder"}
 end
 
 -- translate flag
@@ -150,16 +196,19 @@ function _translate_flag(flag, outputdir)
     if flag then
         if path.instance_of(flag) then
             flag = flag:clone():set(_get_relative_unix_path_to_cmake(flag:rawstr(), outputdir)):str()
-        elseif path.is_absolute(flag) then
-            flag = _get_relative_unix_path_to_cmake(flag, outputdir)
-        elseif flag:startswith("-fmodule-file=") then
-            flag = "-fmodule-file=" .. _get_relative_unix_path_to_cmake(flag:sub(15), outputdir)
-        elseif flag:startswith("-fmodule-mapper=") then
-            flag = "-fmodule-mapper=" .. _get_relative_unix_path_to_cmake(flag:sub(17), outputdir)
-        elseif flag:match("(.+)=(.+)") then
-            local k, v = flag:match("(.+)=(.+)")
-            if v and (v:endswith(".ifc") or v:endswith(".map")) then -- e.g. hello=xxx/hello.ifc
-                flag = k .. "=" .. _get_relative_unix_path_to_cmake(v, outputdir)
+        -- it may be table, https://github.com/xmake-io/xmake/issues/4816
+        elseif type(flag) == "string" then
+            if path.is_absolute(flag) then
+                flag = _get_relative_unix_path_to_cmake(flag, outputdir)
+            elseif flag:startswith("-fmodule-file=") then
+                flag = "-fmodule-file=" .. _get_relative_unix_path_to_cmake(flag:sub(15), outputdir)
+            elseif flag:startswith("-fmodule-mapper=") then
+                flag = "-fmodule-mapper=" .. _get_relative_unix_path_to_cmake(flag:sub(17), outputdir)
+            elseif flag:match("(.+)=(.+)") then
+                local k, v = flag:match("(.+)=(.+)")
+                if v and (v:endswith(".ifc") or v:endswith(".map")) then -- e.g. hello=xxx/hello.ifc
+                    flag = k .. "=" .. _get_relative_unix_path_to_cmake(v, outputdir)
+                end
             end
         end
     end
@@ -205,16 +254,16 @@ function _get_flags_from_target(target, flagkind)
 end
 
 -- add project info
-function _add_project(cmakelists, languages, outputdir)
+function _add_project(cmakelists, outputdir)
 
-    local cmake_version = _get_cmake_minver()
+    local cmake_minver = _get_cmake_minver()
     cmakelists:print([[# this is the build file for project %s
 # it is autogenerated by the xmake build system.
 # do not edit by hand.
 ]], project.name() or "")
     cmakelists:print("# project")
-    cmakelists:print("cmake_minimum_required(VERSION %s)", cmake_version)
-    if cmake_version:ge("3.15.0") then
+    cmakelists:print("cmake_minimum_required(VERSION %s)", cmake_minver)
+    if cmake_minver:ge("3.15.0") then
         -- for MSVC_RUNTIME_LIBRARY
         cmakelists:print("cmake_policy(SET CMP0091 NEW)")
     end
@@ -231,11 +280,15 @@ function _add_project(cmakelists, languages, outputdir)
         if project_version then
             project_info = project_info .. " VERSION " .. project_version
         end
+        local languages = _get_project_languages()
         if languages then
             cmakelists:print("project(%s%s LANGUAGES %s)", project_name, project_info, table.concat(languages, " "))
         else
             cmakelists:print("project(%s%s)", project_name, project_info)
         end
+    end
+    if _can_native_support_for_cxxmodules() then
+        cmakelists:print("set(CMAKE_CXX_SCAN_FOR_MODULES ON)")
     end
     cmakelists:print("")
 end
@@ -264,7 +317,7 @@ function _set_target_compiler(cmakelists, target)
     if config.get("toolchain") or target:get("toolchains") then
         local cc = target:tool("cc")
         if cc then
-            cc = cc:gsub("\\", "/")
+            cc = path.unix(cc)
             cmakelists:print("set(CMAKE_C_COMPILER \"%s\")", cc)
         end
         local cxx, cxx_name = target:tool("cxx")
@@ -282,7 +335,7 @@ function _set_target_compiler(cmakelists, target)
                     cxx = name
                 end
             end
-            cxx = cxx:gsub("\\", "/")
+            cxx = path.unix(cxx)
             cmakelists:print("set(CMAKE_CXX_COMPILER \"%s\")", cxx)
         end
     end
@@ -323,6 +376,11 @@ function _add_target_headeronly(cmakelists, target)
     cmakelists:print("add_library(%s INTERFACE)", target:name())
 end
 
+-- add target: headeronly
+function _add_target_moduleonly(cmakelists, target)
+    cmakelists:print("add_custom_target(%s)", target:name())
+end
+
 -- add target dependencies
 function _add_target_dependencies(cmakelists, target)
     local deps = target:get("deps")
@@ -340,7 +398,7 @@ function _add_target_sources(cmakelists, target, outputdir)
     local has_cuda = false
     cmakelists:print("target_sources(%s PRIVATE", target:name())
     local sourcebatches = target:sourcebatches()
-    for _, sourcebatch in table.orderpairs(sourcebatches) do
+    for name, sourcebatch in table.orderpairs(sourcebatches) do
         if _sourcebatch_is_built(sourcebatch) then
             for _, sourcefile in ipairs(sourcebatch.sourcefiles) do
                 cmakelists:print("    " .. _get_relative_unix_path(sourcefile, outputdir))
@@ -587,31 +645,40 @@ end
 function _add_target_warnings(cmakelists, target)
     local flags_gcc =
     {
-        none     = "-w"
-    ,   less     = "-Wall"
-    ,   more     = "-Wall"
-    ,   all      = "-Wall"
-    ,   allextra = "-Wall -Wextra"
-    ,   error    = "-Werror"
+        none       = "-w"
+    ,   less       = "-Wall"
+    ,   more       = "-Wall"
+    ,   all        = "-Wall"
+    ,   allextra   = "-Wall -Wextra"
+    ,   pedantic   = "-Wpedantic"
+    ,   everything = "-Wall -Wextra"
+    ,   error      = "-Werror"
     }
     local flags_msvc =
     {
-        none     = "-W0"
-    ,   less     = "-W1"
-    ,   more     = "-W3"
-    ,   all      = "-W3" -- = "-Wall" will enable too more warnings
-    ,   allextra = "-W4"
-    ,   error    = "-WX"
+        none       = "-W0"
+    ,   less       = "-W1"
+    ,   more       = "-W3"
+    ,   all        = "-W3" -- = "-Wall" will enable too more warnings
+    ,   allextra   = "-W4"
+    ,   everything = "-Wall"
+    ,   error      = "-WX"
     }
     local warnings = target:get("warnings")
     if warnings then
         cmakelists:print("if(MSVC)")
         for _, warn in ipairs(warnings) do
-            cmakelists:print("    target_compile_options(%s PRIVATE %s)", target:name(), flags_msvc[warn])
+            local flag = flags_msvc[warn]
+            if flag then
+                cmakelists:print("    target_compile_options(%s PRIVATE %s)", target:name(), flag)
+            end
         end
         cmakelists:print("else()")
         for _, warn in ipairs(warnings) do
-            cmakelists:print("    target_compile_options(%s PRIVATE %s)", target:name(), flags_gcc[warn])
+            local flag = flags_gcc[warn]
+            if flag then
+                cmakelists:print("    target_compile_options(%s PRIVATE %s)", target:name(), flag)
+            end
         end
         cmakelists:print("endif()")
     end
@@ -803,11 +870,22 @@ function _add_target_link_libraries(cmakelists, target, outputdir)
         cmakelists:print(")")
     end
 
+    -- get c++ modules rules
+    local cxxmodules_rules
+    if _can_native_support_for_cxxmodules() then
+        cxxmodules_rules = _get_cxxmodules_rules()
+    end
+    if cxxmodules_rules then
+        cxxmodules_rules = hashset.from(cxxmodules_rules)
+    else
+        cxxmodules_rules = hashset.new()
+    end
+
     -- add other object files, maybe from custom rules
     local objectfiles_set = hashset.new()
     local sourcebatches = target:sourcebatches()
     for _, sourcebatch in table.orderpairs(sourcebatches) do
-        if _sourcebatch_is_built(sourcebatch) then
+        if _sourcebatch_is_built(sourcebatch) or cxxmodules_rules:has(sourcebatch.rulename) then
             for _, objectfile in ipairs(sourcebatch.objectfiles) do
                 objectfiles_set:insert(objectfile)
             end
@@ -967,19 +1045,25 @@ function _add_target_custom_commands(cmakelists, target, outputdir)
     -- build sourcebatch groups first
     local sourcegroups = rule_groups.build_sourcebatch_groups(target, target:sourcebatches())
 
+    -- ignore c++ modules rules
+    local ignored_rules
+    if _can_native_support_for_cxxmodules() then
+        ignored_rules = _get_cxxmodules_rules()
+    end
+
     -- add before commands
     -- we use irpairs(groups), because the last group that should be given the highest priority.
     local cmds_before = {}
-    target_cmds.get_target_buildcmd(target, cmds_before, "before")
-    target_cmds.get_target_buildcmd_sourcegroups(target, cmds_before, sourcegroups, "before")
+    target_cmds.get_target_buildcmd(target, cmds_before, {suffix = "before", ignored_rules = ignored_rules})
+    target_cmds.get_target_buildcmd_sourcegroups(target, cmds_before, sourcegroups, {suffix = "before", ignored_rules = ignored_rules})
     -- rule.on_buildcmd_files should also be executed before building the target, as cmake PRE_BUILD does not work.
-    target_cmds.get_target_buildcmd_sourcegroups(target, cmds_before, sourcegroups)
+    target_cmds.get_target_buildcmd_sourcegroups(target, cmds_before, sourcegroups, {ignored_rules = ignored_rules})
     _add_target_custom_commands_for_batchcmds(cmakelists, target, outputdir, "before", cmds_before)
 
     -- add after commands
     local cmds_after = {}
-    target_cmds.get_target_buildcmd_sourcegroups(target, cmds_after, sourcegroups, "after")
-    target_cmds.get_target_buildcmd(target, cmds_after, "after")
+    target_cmds.get_target_buildcmd_sourcegroups(target, cmds_after, sourcegroups, {suffix = "after", ignored_rules = ignored_rules})
+    target_cmds.get_target_buildcmd(target, cmds_after, {suffix = "after", ignored_rules = ignored_rules})
     _add_target_custom_commands_for_batchcmds(cmakelists, target, outputdir, "after", cmds_after)
 end
 
@@ -990,18 +1074,20 @@ function _add_target(cmakelists, target, outputdir)
     cmakelists:print("# target")
 
     -- is phony target?
-    local targetkind = target:kind()
     if target:is_phony() then
         return _add_target_phony(cmakelists, target)
-    elseif targetkind == "binary" then
+    elseif target:is_binary() then
         _add_target_binary(cmakelists, target, outputdir)
-    elseif targetkind == "static" then
+    elseif target:is_static() then
         _add_target_static(cmakelists, target, outputdir)
-    elseif targetkind == "shared" then
+    elseif target:is_shared() then
         _add_target_shared(cmakelists, target, outputdir)
-    elseif targetkind == 'headeronly' then
+    elseif target:is_headeronly() then
         _add_target_headeronly(cmakelists, target)
         _add_target_include_directories(cmakelists, target, outputdir)
+        return
+    elseif target:is_moduleonly() then
+        _add_target_moduleonly(cmakelists, target)
         return
     else
         raise("unknown target kind %s", target:kind())
@@ -1035,7 +1121,7 @@ function _add_target(cmakelists, target, outputdir)
     -- add target warnings
     _add_target_warnings(cmakelists, target)
 
-    -- add target exceptions 
+    -- add target exceptions
     _add_target_exceptions(cmakelists, target)
 
     -- add target languages
@@ -1073,7 +1159,7 @@ end
 function _generate_cmakelists(cmakelists, outputdir)
 
     -- add project info
-    _add_project(cmakelists, _get_project_languages(project.targets()), outputdir)
+    _add_project(cmakelists, outputdir)
 
     -- add targets
     for _, target in table.orderpairs(project.targets()) do

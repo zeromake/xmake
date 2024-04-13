@@ -27,7 +27,8 @@ task("build")
             ,   shortname = 'b'
             ,   options =
                 {
-                    {'b', "build",      "k",  nil   , "Build target. This is default building mode and optional."     }
+                    {nil, "version",    "k",  nil   , "Print the version number and exit."                            }
+                ,   {'b', "build",      "k",  nil   , "Build target. This is default building mode and optional."     }
                 ,   {'r', "rebuild",    "k",  nil   , "Rebuild the target."                                           }
                 ,   {'a', "all",        "k",  nil   , "Build all targets."                                            }
                 ,   {nil, "shallow",    "k",  nil   , "Only re-build the given targets without dependencies."         }
@@ -47,7 +48,7 @@ task("build")
                                                       "e.g. ",
                                                       "    - xmake --files=src/main.c",
                                                       "    - xmake --files='src/*.c' [target]",
-                                                      "    - xmake --files='src/**c|excluded_file.c'",
+                                                      "    - xmake --files='src/**.c|excluded_file.c'",
                                                       "    - xmake --files='src/main.c" .. path.envsep() .. "src/test.c'"  }
 
                 ,   {}

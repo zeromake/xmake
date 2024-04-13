@@ -4,8 +4,68 @@
 
 ### New features
 
+* [#4874](https://github.com/xmake-io/xmake/pull/4874): Add Harmony SDK support
+* [#4889](https://github.com/xmake-io/xmake/issues/4889): Add signal module to register signal handler in lua
+* [#4925](https://github.com/xmake-io/xmake/issues/4925): Add native modules support
+* [#4938](https://github.com/xmake-io/xmake/issues/4938): Support for cppfront/h2
+
+### Changes
+
+* Improve packages to support for clang-cl
+* [#4893](https://github.com/xmake-io/xmake/issues/4893): Improve rc includes deps
+* [#4928](https://github.com/xmake-io/xmake/issues/4928): Improve to build and link speed
+* [#4931](https://github.com/xmake-io/xmake/pull/4931): Update pdcurses
+
+### Bugs fixed
+
+* [#4882](https://github.com/xmake-io/xmake/issues/4882): Fix install deps with --group
+* [#4877](https://github.com/xmake-io/xmake/issues/4877): Fix compile error for xpack with unity build
+* [#4887](https://github.com/xmake-io/xmake/issues/4887): Fix object deps
+
+## v2.8.9
+
+### New features
+
+* [#4843](https://github.com/xmake-io/xmake/issues/4843): Endianness/Byte-order detection on build machine
+
+### Changes
+
+* [#4798](https://github.com/xmake-io/xmake/issues/4798): Improve wasi sdk detect
+* [#4772](https://github.com/xmake-io/xmake/issues/4772): Improve tools.cmake to support vs2022 preview (v144)
+* [#4813](https://github.com/xmake-io/xmake/issues/4813): Add gb2312 encoding
+* [#4864](https://github.com/xmake-io/xmake/issues/4864): Improve to extract symbols for gdb
+* [#4831](https://github.com/xmake-io/xmake/issues/4831): Allow target:fileconfig() for headerfiles
+* [#4846](https://github.com/xmake-io/xmake/issues/4846): Improve to show progress
+
+### Bugs Fixed
+
+* Fix select_script match pattern
+* [#4763](https://github.com/xmake-io/xmake/issues/4763): Fix {force = true}
+* [#4807](https://github.com/xmake-io/xmake/issues/4807): Fix nimble::find_package
+* [#4857](https://github.com/xmake-io/xmake/issues/4857): Fix parse basic options
+
+## v2.8.8
+
+### Changes
+
+* Add `package:check_sizeof()`
+
+### Bugs Fixed
+
+* [#4774](https://github.com/xmake-io/xmake/issues/4774): Fix android symbol strip
+* [#4769](https://github.com/xmake-io/xmake/issues/4769): Fix cross toolchain and format
+* [#4776](https://github.com/xmake-io/xmake/issues/4776): Fix soname for linux
+* [#4638](https://github.com/xmake-io/xmake/issues/4638): Fix vsxmake with --menu config
+
+## v2.8.7
+
+### New features
+
 * [#4544](https://github.com/xmake-io/xmake/issues/4544): Support to wait process timeout for `xmake test`
 * [#4606](https://github.com/xmake-io/xmake/pull/4606): Add `add_versionfiles` api in package
+* [#4709](https://github.com/xmake-io/xmake/issues/4709): Add cosmocc toolchain support
+* [#4715](https://github.com/xmake-io/xmake/issues/4715): Add is_cross() api in description scope
+* [#4747](https://github.com/xmake-io/xmake/issues/4747): Add `build.always_update_configfiles` policy
 
 ### Changes
 
@@ -17,10 +77,14 @@
 * [#4614](https://github.com/xmake-io/xmake/issues/4614): Support android ndk 26b
 * [#4473](https://github.com/xmake-io/xmake/issues/4473): Enable warning output by default
 * [#4477](https://github.com/xmake-io/xmake/issues/4477): Improve runtimes to support libc++/libstdc++
+* [#4657](https://github.com/xmake-io/xmake/issues/4657): Improve to select script pattern
+* [#4673](https://github.com/xmake-io/xmake/pull/4673): Refactor modules support
+* [#4746](https://github.com/xmake-io/xmake/pull/4746): Add native modules support for cmake generator
 
 ### Bugs Fixed
 
 * [#4596](https://github.com/xmake-io/xmake/issues/4596): Fix remote build cache
+* [#4689](https://github.com/xmake-io/xmake/issues/4689): Fix deps inherit
 
 ## v2.8.6
 
@@ -1724,8 +1788,68 @@
 
 ### 新特性
 
+* [#4874](https://github.com/xmake-io/xmake/pull/4874): 添加鸿蒙 SDK 支持
+* [#4889](https://github.com/xmake-io/xmake/issues/4889): 添加 signal 模块 去注册信号处理
+* [#4925](https://github.com/xmake-io/xmake/issues/4925): 添加 native 模块支持
+* [#4938](https://github.com/xmake-io/xmake/issues/4938): 增加对 cppfront/h2 的支持
+
+### 改进
+
+* 改进包管理，支持切换 clang-cl
+* [#4893](https://github.com/xmake-io/xmake/issues/4893): 改进 rc 头文件依赖检测
+* [#4928](https://github.com/xmake-io/xmake/issues/4928): 改进构建和链接速度，增量编译时候效果更加明显
+* [#4931](https://github.com/xmake-io/xmake/pull/4931): 更新 pdcurses
+
+### Bugs 修复
+
+* [#4882](https://github.com/xmake-io/xmake/issues/4882): 修复安装组依赖问题
+* [#4877](https://github.com/xmake-io/xmake/issues/4877): 修复 xpack 打包时，unit build 编译失败问题
+* [#4887](https://github.com/xmake-io/xmake/issues/4887): 修复 object 依赖链接
+
+## v2.8.9
+
+### 新特性
+
+* [#4843](https://github.com/xmake-io/xmake/issues/4843): 添加 check_bigendian 接口实现大小端探测
+
+### 改进
+
+* [#4798](https://github.com/xmake-io/xmake/issues/4798): 改进 wasi sdk 检测
+* [#4772](https://github.com/xmake-io/xmake/issues/4772): 改进 tools.cmake 去兼容支持 vs2022 preview (v144)
+* [#4813](https://github.com/xmake-io/xmake/issues/4813): 添加 gb2312 编码
+* [#4864](https://github.com/xmake-io/xmake/issues/4864): 改进抽取符号，支持 gdb 断点调试
+* [#4831](https://github.com/xmake-io/xmake/issues/4831): 改进 target:fileconfig() 支持 headerfiles
+* [#4846](https://github.com/xmake-io/xmake/issues/4846): 改进进度显示，解决顺序错乱问题
+
+### Bugs 修复
+
+* 修复 select_script 的脚本模式匹配
+* [#4763](https://github.com/xmake-io/xmake/issues/4763): 修复 {force = true}
+* [#4807](https://github.com/xmake-io/xmake/issues/4807): 修复 nimble::find_package
+* [#4857](https://github.com/xmake-io/xmake/issues/4857): 修复对 -P/-F 等基础选项的解析
+
+## v2.8.8
+
+### 改进
+
+* 添加 `package:check_sizeof()`
+
+### Bugs 修复
+
+* [#4774](https://github.com/xmake-io/xmake/issues/4774): 修复 Android NDK r26b 上的 strip 支持
+* [#4769](https://github.com/xmake-io/xmake/issues/4769): 修复交叉编译工具链问题
+* [#4776](https://github.com/xmake-io/xmake/issues/4776): 修复 soname
+* [#4638](https://github.com/xmake-io/xmake/issues/4638): 修复 vsxmake generator
+
+## v2.8.7
+
+### 新特性
+
 * [#4544](https://github.com/xmake-io/xmake/issues/4544): 改进 `xmake test`，支持等待进程超时
 * [#4606](https://github.com/xmake-io/xmake/pull/4606): 为 package 添加 `add_versionfiles` 接口
+* [#4709](https://github.com/xmake-io/xmake/issues/4709): 添加 cosmocc 工具链支持
+* [#4715](https://github.com/xmake-io/xmake/issues/4715): 在描述域添加 is_cross() 接口
+* [#4747](https://github.com/xmake-io/xmake/issues/4747): 添加 `build.always_update_configfiles` 策略
 
 ### 改进
 
@@ -1737,10 +1861,14 @@
 * [#4614](https://github.com/xmake-io/xmake/issues/4614): 改进支持 android ndk 26b
 * [#4473](https://github.com/xmake-io/xmake/issues/4473): 默认启用警告输出
 * [#4477](https://github.com/xmake-io/xmake/issues/4477): 改进 runtimes 去支持 libc++/libstdc++
+* [#4657](https://github.com/xmake-io/xmake/issues/4657): 改进脚本的模式匹配
+* [#4673](https://github.com/xmake-io/xmake/pull/4673): 重构模块支持
+* [#4746](https://github.com/xmake-io/xmake/pull/4746): 为 cmake generator 添加原生 c++ modules 支持
 
 ### Bugs 修复
 
 * [#4596](https://github.com/xmake-io/xmake/issues/4596): 修复远程构建缓存
+* [#4689](https://github.com/xmake-io/xmake/issues/4689): 修复目标依赖继承
 
 ## v2.8.6
 

@@ -32,7 +32,10 @@ local table           = require("base/table")
 local baseoption      = require("base/option")
 local hashset         = require("base/hashset")
 local deprecated      = require("base/deprecated")
+local select_script   = require("base/private/select_script")
+local match_copyfiles = require("base/private/match_copyfiles")
 local instance_deps   = require("base/private/instance_deps")
+local is_cross        = require("base/private/is_cross")
 local memcache        = require("cache/memcache")
 local rule            = require("project/rule")
 local option          = require("project/option")
@@ -172,93 +175,6 @@ function _instance:_load_after()
     return true
 end
 
--- get the copied files
-function _instance:_copiedfiles(filetype, outputdir, pathfilter)
-
-    -- no copied files?
-    local copiedfiles = self:get(filetype)
-    if not copiedfiles then return end
-
-    -- get the extra information
-    local extrainfo = table.wrap(self:get("__extra_" .. filetype))
-
-    -- get the source paths and destinate paths
-    local srcfiles = {}
-    local dstfiles = {}
-    local fileinfos = {}
-    for _, copiedfile in ipairs(table.wrap(copiedfiles)) do
-
-        -- get the root directory
-        local rootdir, count = copiedfile:gsub("|.*$", ""):gsub("%(.*%)$", "")
-        if count == 0 then
-            rootdir = nil
-        end
-        if rootdir and rootdir:trim() == "" then
-            rootdir = "."
-        end
-
-        -- remove '(' and ')'
-        local srcpaths = copiedfile:gsub("[%(%)]", "")
-        if srcpaths then
-
-            -- get the source paths
-            srcpaths = os.match(srcpaths)
-            if srcpaths and #srcpaths > 0 then
-
-                -- add the source copied files
-                table.join2(srcfiles, srcpaths)
-
-                -- the copied directory exists?
-                if outputdir then
-
-                    -- get the file info
-                    local fileinfo = extrainfo[copiedfile] or {}
-
-                    -- get the prefix directory
-                    local prefixdir = fileinfo.prefixdir
-                    if fileinfo.rootdir then
-                        rootdir = fileinfo.rootdir
-                    end
-
-                    -- add the destinate copied files
-                    for _, srcpath in ipairs(srcpaths) do
-
-                        -- get the destinate directory
-                        local dstdir = outputdir
-                        if prefixdir then
-                            dstdir = path.join(dstdir, prefixdir)
-                        end
-
-                        -- the destinate file
-                        local dstfile = nil
-                        if rootdir then
-                            dstfile = path.absolute(path.relative(srcpath, rootdir), dstdir)
-                        else
-                            dstfile = path.join(dstdir, path.filename(srcpath))
-                        end
-                        assert(dstfile)
-
-                        -- modify filename
-                        if fileinfo.filename then
-                            dstfile = path.join(path.directory(dstfile), fileinfo.filename)
-                        end
-
-                        -- filter the destinate file path
-                        if pathfilter then
-                            dstfile = pathfilter(dstfile, fileinfo)
-                        end
-
-                        -- add it
-                        table.insert(dstfiles, dstfile)
-                        table.insert(fileinfos, fileinfo)
-                    end
-                end
-            end
-        end
-    end
-    return srcfiles, dstfiles, fileinfos
-end
-
 -- get the visibility, private: 1, interface: 2, public: 3 = 1 | 2
 function _instance:_visibility(opt)
     local visibility = 1
@@ -317,23 +233,32 @@ function _instance:_invalidate(name)
     -- we need to flush the source files cache if target/files are modified, e.g. `target:add("files", "xxx.c")`
     if name == "files" then
         self._SOURCEFILES = nil
-        self._FILESCONFIG = nil
         self._OBJECTFILES = nil
         self._SOURCEBATCHES = nil
         self:_update_filerules()
     elseif name == "deps" then
         self._DEPS = nil
         self._ORDERDEPS = nil
+        self._INHERITDEPS = nil
+    end
+    if self._FILESCONFIG then
+        self._FILESCONFIG[name] = nil
     end
 end
 
 -- build deps
 function _instance:_build_deps()
     if target._project() then
-        local instances = target._project().targets()
-        self._DEPS      = self._DEPS or {}
-        self._ORDERDEPS = self._ORDERDEPS or {}
+        local instances   = target._project().targets()
+        self._DEPS        = self._DEPS or {}
+        self._ORDERDEPS   = self._ORDERDEPS or {}
+        self._INHERITDEPS = self._INHERITDEPS or {}
         instance_deps.load_deps(self, instances, self._DEPS, self._ORDERDEPS, {self:name()})
+        -- @see https://github.com/xmake-io/xmake/issues/4689
+        instance_deps.load_deps(self, instances, {}, self._INHERITDEPS, {self:name()}, function (t, dep)
+            local depinherit = t:extraconf("deps", dep:name(), "inherit")
+            return depinherit == nil or depinherit
+        end)
     end
 end
 
@@ -344,26 +269,23 @@ end
 
 -- get values from target deps with {interface|public = ...}
 function _instance:_get_from_deps(name, result_values, result_sources, opt)
-    local orderdeps = self:orderdeps()
+    local orderdeps = self:orderdeps({inherit = true})
     local total = #orderdeps
     for idx, _ in ipairs(orderdeps) do
         local dep = orderdeps[total + 1 - idx]
-        local depinherit = self:extraconf("deps", dep:name(), "inherit")
-        if depinherit == nil or depinherit then
-            local values = dep:get(name, opt)
-            if values ~= nil then
-                table.insert(result_values, values)
-                table.insert(result_sources, "dep::" .. dep:name())
-            end
-            local dep_values = {}
-            local dep_sources = {}
-            dep:_get_from_options(name, dep_values, dep_sources, opt)
-            dep:_get_from_packages(name, dep_values, dep_sources, opt)
-            for idx, values in ipairs(dep_values) do
-                local dep_source = dep_sources[idx]
-                table.insert(result_values, values)
-                table.insert(result_sources, "dep::" .. dep:name() .. "/" .. dep_source)
-            end
+        local values = dep:get(name, opt)
+        if values ~= nil then
+            table.insert(result_values, values)
+            table.insert(result_sources, "dep::" .. dep:name())
+        end
+        local dep_values = {}
+        local dep_sources = {}
+        dep:_get_from_options(name, dep_values, dep_sources, opt)
+        dep:_get_from_packages(name, dep_values, dep_sources, opt)
+        for idx, values in ipairs(dep_values) do
+            local dep_source = dep_sources[idx]
+            table.insert(result_values, values)
+            table.insert(result_sources, "dep::" .. dep:name() .. "/" .. dep_source)
         end
     end
 end
@@ -538,6 +460,23 @@ function _instance:_checked_target()
     return checked_target
 end
 
+-- get format
+function _instance:_format(kind)
+    local formats = self._FORMATS
+    if not formats then
+        for _, toolchain_inst in ipairs(self:toolchains()) do
+            formats = toolchain_inst:formats()
+            if formats then
+                break
+            end
+        end
+        self._FORMATS = formats
+    end
+    if formats then
+        return formats[kind or self:kind()]
+    end
+end
+
 -- clone target, @note we can just call it in after_load()
 function _instance:clone()
     if not self:_is_loaded() then
@@ -549,6 +488,9 @@ function _instance:clone()
     end
     if self._ORDERDEPS then
         instance._ORDERDEPS = table.clone(self._ORDERDEPS)
+    end
+    if self._INHERITDEPS then
+        instance._INHERITDEPS = table.clone(self._INHERITDEPS)
     end
     if self._RULES then
         instance._RULES = table.clone(self._RULES)
@@ -1127,14 +1069,15 @@ function _instance:deps()
 end
 
 -- get target ordered deps
-function _instance:orderdeps()
+function _instance:orderdeps(opt)
+    opt = opt or {}
     if not self:_is_loaded() then
         os.raise("please call target:orderdeps() in after_load()!")
     end
     if self._DEPS == nil then
         self:_build_deps()
     end
-    return self._ORDERDEPS
+    return opt.inherit and self._INHERITDEPS or self._ORDERDEPS
 end
 
 -- get target rules
@@ -1201,9 +1144,14 @@ function _instance:is_headeronly()
     return self:kind() == "headeronly"
 end
 
+-- is moduleonly target?
+function _instance:is_moduleonly()
+    return self:kind() == "moduleonly"
+end
+
 -- is library target?
 function _instance:is_library()
-    return self:is_static() or self:is_shared() or self:is_headeronly()
+    return self:is_static() or self:is_shared() or self:is_headeronly() or self:is_moduleonly()
 end
 
 -- is default target?
@@ -1220,6 +1168,11 @@ end
 -- is rebuilt?
 function _instance:is_rebuilt()
     return self:data("rebuilt")
+end
+
+-- is cross-compilation?
+function _instance:is_cross()
+    return is_cross(self:plat(), self:arch())
 end
 
 -- get the enabled option
@@ -1366,7 +1319,7 @@ end
 
 -- get the config info of the given package
 function _instance:pkgconfig(pkgname)
-    local extra_packages = self:get("__extra_packages")
+    local extra_packages = self:extraconf("packages")
     if extra_packages then
         return extra_packages[pkgname]
     end
@@ -1555,7 +1508,7 @@ end
 function _instance:filename()
 
     -- no target file?
-    if self:is_object() or self:is_phony() or self:is_headeronly() then
+    if self:is_object() or self:is_phony() or self:is_headeronly() or self:is_moduleonly() then
         return
     end
 
@@ -1567,6 +1520,7 @@ function _instance:filename()
         local suffixname = self:get("suffixname")
         local extension  = self:get("extension")
         filename = target.filename(self:basename(), targetkind, {
+            format = self:_format(),
             plat = self:plat(), arch = self:arch(),
             prefixname = prefixname,
             suffixname = suffixname,
@@ -1612,6 +1566,7 @@ function _instance:symbolfile()
     local suffixname = self:get("suffixname")
     local filename = target.filename(self:basename(), "symbol", {
         plat = self:plat(), arch = self:arch(),
+        format = self:_format("symbol"),
         prefixname = prefixname,
         suffixname = suffixname})
     assert(filename)
@@ -1733,51 +1688,75 @@ function _instance:filerules(sourcefile)
 end
 
 -- get the config info of the given source file
-function _instance:fileconfig(sourcefile)
+function _instance:fileconfig(sourcefile, opt)
+    opt = opt or {}
+    local filetype = opt.filetype or "files"
 
-    -- get files config
-    local filesconfig = self._FILESCONFIG
-    if not filesconfig then
-        filesconfig = {}
-        for filepath, fileconfig in pairs(table.wrap(self:get("__extra_files"))) do
-
-            -- match source files
-            local results = os.match(filepath)
-            if #results == 0 and not fileconfig.always_added then
-                local sourceinfo = self:sourceinfo("files", filepath) or {}
-                utils.warning("%s:%d${clear}: cannot match add_files(\"%s\") in %s(%s)", sourceinfo.file or "", sourceinfo.line or -1, filepath, self:type(), self:name())
-            end
-
-            -- process source files
-            for _, file in ipairs(results) do
-                if path.is_absolute(file) then
-                    file = path.relative(file, os.projectdir())
-                end
-                filesconfig[file] = fileconfig
-            end
-            -- we also need support always_added, @see https://github.com/xmake-io/xmake/issues/1634
-            if #results == 0 and fileconfig.always_added then
-                filesconfig[filepath] = fileconfig
-            end
+    -- get configs from user, e.g. target:fileconfig_set/add
+    -- it has contained all original configs
+    if self._FILESCONFIG_USER then
+        local filesconfig = self._FILESCONFIG_USER[filetype]
+        if filesconfig and filesconfig[sourcefile] then
+            return filesconfig[sourcefile]
         end
-        self._FILESCONFIG = filesconfig
     end
 
-    -- get file config
+    -- get orignal configs from `add_xxxfiles()`
+    self._FILESCONFIG = self._FILESCONFIG or {}
+    local filesconfig = self._FILESCONFIG[filetype]
+    if not filesconfig then
+        filesconfig = {}
+        for filepath, fileconfig in pairs(table.wrap(self:extraconf(filetype))) do
+            local results = os.match(filepath)
+            if #results > 0 then
+                for _, file in ipairs(results) do
+                    if path.is_absolute(file) then
+                        file = path.relative(file, os.projectdir())
+                    end
+                    filesconfig[file] = fileconfig
+                end
+            else
+                -- we also need support always_added, @see https://github.com/xmake-io/xmake/issues/1634
+                if fileconfig.always_added then
+                    filesconfig[filepath] = fileconfig
+                end
+            end
+        end
+        self._FILESCONFIG[filetype] = filesconfig
+    end
     return filesconfig[sourcefile]
 end
 
 -- set the config info to the given source file
-function _instance:fileconfig_set(sourcefile, info)
-    local filesconfig = self._FILESCONFIG or {}
+function _instance:fileconfig_set(sourcefile, info, opt)
+    opt = opt or {}
+    self._FILESCONFIG_USER = self._FILESCONFIG_USER or {}
+    local filetype = opt.filetype or "files"
+    local filesconfig = self._FILESCONFIG_USER[filetype]
+    if not filesconfig then
+        filesconfig = {}
+        self._FILESCONFIG_USER[filetype] = filesconfig
+    end
     filesconfig[sourcefile] = info
-    self._FILESCONFIG = filesconfig
 end
 
 -- add the config info to the given source file
-function _instance:fileconfig_add(sourcefile, info)
-    local filesconfig = self._FILESCONFIG or {}
+function _instance:fileconfig_add(sourcefile, info, opt)
+    opt = opt or {}
+    self._FILESCONFIG_USER = self._FILESCONFIG_USER or {}
+    local filetype = opt.filetype or "files"
+    local filesconfig = self._FILESCONFIG_USER[filetype]
+    if not filesconfig then
+        filesconfig = {}
+        self._FILESCONFIG_USER[filetype] = filesconfig
+    end
+
+    -- we fetch orignal configs first if no user configs
     local fileconfig = filesconfig[sourcefile]
+    if not fileconfig then
+        fileconfig = table.clone(self:fileconfig(sourcefile, opt))
+        filesconfig[sourcefile] = fileconfig
+    end
     if fileconfig then
         for k, v in pairs(info) do
             if k == "force" then
@@ -1803,7 +1782,6 @@ function _instance:fileconfig_add(sourcefile, info)
     else
         filesconfig[sourcefile] = info
     end
-    self._FILESCONFIG = filesconfig
 end
 
 -- get the source files
@@ -1895,7 +1873,7 @@ function _instance:sourcefiles()
     if removed_count > 0 then
         table.remove_if(sourcefiles, function (i, sourcefile)
             for _, removed_file in ipairs(sourcefiles_removed) do
-                local pattern = path.translate(removed_file:gsub("|.*$", ""))
+                local pattern = path.translate((removed_file:gsub("|.*$", "")))
                 if pattern:sub(1, 2):find('%.[/\\]') then
                     pattern = pattern:sub(3)
                 end
@@ -1916,7 +1894,10 @@ end
 -- get object file from source file
 function _instance:objectfile(sourcefile)
     return self:autogenfile(sourcefile, {rootdir = self:objectdir(),
-        filename = target.filename(path.filename(sourcefile), "object", {plat = self:plat(), arch = self:arch()})})
+        filename = target.filename(path.filename(sourcefile), "object", {
+            plat = self:plat(),
+            arch = self:arch(),
+            format = self:_format("object")})})
 end
 
 -- get the object files
@@ -1955,7 +1936,7 @@ function _instance:objectfiles()
             table.join2(_objectfiles, t:objectfiles())
             local _plaindeps = t:get("deps")
             if _plaindeps then
-                for _, depname in ipairs(_plaindeps) do
+                for _, depname in ipairs(table.wrap(_plaindeps)) do
                     local dep = t:dep(depname)
                     if dep and dep:is_object() then
                         table.join2(_objectfiles, _get_all_objectfiles_of_object_dep(dep))
@@ -1985,135 +1966,50 @@ end
 
 -- get the header files
 function _instance:headerfiles(outputdir, opt)
-
-    -- get header files?
     opt = opt or {}
-    local headers = table.join(headers or {}, self:get("headerfiles"))
+    local headerfiles = self:get("headerfiles")
     -- add_headerfiles("src/*.h", {install = false})
     -- @see https://github.com/xmake-io/xmake/issues/2577
     if opt.installonly then
        local installfiles = {}
-       for _, headerfile in ipairs(table.wrap(headers)) do
+       for _, headerfile in ipairs(table.wrap(headerfiles)) do
            if self:extraconf("headerfiles", headerfile, "install") ~= false then
                table.insert(installfiles, headerfile)
            end
        end
-       headers = installfiles
+       headerfiles = installfiles
     end
-    if not headers then
+    if not headerfiles then
         return
     end
 
-    -- get the installed header directory
     local headerdir = outputdir
     if not headerdir then
         if self:installdir() then
             headerdir = path.join(self:installdir(), "include")
         end
     end
-
-    -- get the extra information
-    local extrainfo = table.wrap(self:get("__extra_headerfiles"))
-
-    -- get the source paths and destinate paths
-    local srcheaders = {}
-    local dstheaders = {}
-    local srcheaders_removed = {}
-    local removed_count = 0
-    for _, header in ipairs(table.wrap(headers)) do
-
-        -- mark as removed files?
-        local removed = false
-        local prefix = "__remove_"
-        if header:startswith(prefix) then
-            header = header:sub(#prefix + 1)
-            removed = true
-        end
-
-        -- get the root directory
-        local rootdir, count = header:gsub("|.*$", ""):gsub("%(.*%)$", "")
-        if count == 0 then
-            rootdir = nil
-        end
-        if rootdir and rootdir:trim() == "" then
-            rootdir = "."
-        end
-
-        -- remove '(' and ')' first
-        local srcpaths = header:gsub("[%(%)]", "")
-        if srcpaths then
-
-            -- get the source paths
-            srcpaths = os.match(srcpaths)
-            if srcpaths then
-                if removed then
-                    removed_count = removed_count + #srcpaths
-                    table.join2(srcheaders_removed, srcpaths)
-                else
-                    -- add the source headers
-                    table.join2(srcheaders, srcpaths)
-
-                    -- get the destinate directories if the install directory exists
-                    if headerdir then
-                        local prefixdir = (extrainfo[header] or {}).prefixdir
-                        for _, srcpath in ipairs(srcpaths) do
-                            local dstdir = headerdir
-                            if prefixdir then
-                                dstdir = path.join(dstdir, prefixdir)
-                            end
-                            local dstheader = nil
-                            if rootdir then
-                                dstheader = path.absolute(path.relative(srcpath, rootdir), dstdir)
-                            else
-                                dstheader = path.join(dstdir, path.filename(srcpath))
-                            end
-                            table.insert(dstheaders, dstheader)
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    -- remove all header files which need be removed
-    if removed_count > 0 then
-        table.remove_if(srcheaders, function (i, srcheader)
-            for _, removed_file in ipairs(srcheaders_removed) do
-                local pattern = path.translate(removed_file:gsub("|.*$", ""))
-                if pattern:sub(1, 2):find('%.[/\\]') then
-                    pattern = pattern:sub(3)
-                end
-                pattern = path.pattern(pattern)
-                if srcheader:match(pattern) then
-                    if i <= #dstheaders then
-                        table.remove(dstheaders, i)
-                    end
-                    return true
-                end
-            end
-        end)
-    end
-    return srcheaders, dstheaders
+    return match_copyfiles(self, "headerfiles", headerdir, {copyfiles = headerfiles})
 end
 
 -- get the configuration files
 function _instance:configfiles(outputdir)
-    return self:_copiedfiles("configfiles", outputdir or self:configdir(), function (dstpath, fileinfo)
+    return match_copyfiles(self, "configfiles", outputdir or self:configdir(), {pathfilter = function (dstpath, fileinfo)
             if dstpath:endswith(".in") then
                 dstpath = dstpath:sub(1, -4)
             end
             return dstpath
-        end)
+        end})
 end
 
 -- get the install files
 function _instance:installfiles(outputdir)
-    return self:_copiedfiles("installfiles", outputdir or self:installdir())
+    return match_copyfiles(self, "installfiles", outputdir or self:installdir())
 end
 
 -- get the extra files
 function _instance:extrafiles()
-    return (self:_copiedfiles("extrafiles"))
+    return (match_copyfiles(self, "extrafiles"))
 end
 
 -- get depend file from object file
@@ -2311,48 +2207,7 @@ function _instance:script(name, generic)
 
     -- get script
     local script = self:get(name)
-    local result = nil
-    if type(script) == "function" then
-        result = script
-    elseif type(script) == "table" then
-
-        -- get plat and arch
-        local plat = self:plat()
-        local arch = self:arch()
-
-        -- match pattern
-        --
-        -- `@linux`
-        -- `@linux|x86_64`
-        -- `@macosx,linux`
-        -- `android@macosx,linux`
-        -- `android|armeabi-v7a@macosx,linux`
-        -- `android|armeabi-v7a@macosx,linux|x86_64`
-        -- `android|armeabi-v7a@linux|x86_64`
-        --
-        for _pattern, _script in pairs(script) do
-            local hosts = {}
-            local hosts_spec = false
-            _pattern = _pattern:gsub("@(.+)", function (v)
-                for _, host in ipairs(v:split(',')) do
-                    hosts[host] = true
-                    hosts_spec = true
-                end
-                return ""
-            end)
-            if not _pattern:startswith("__") and (not hosts_spec or hosts[os.subhost() .. '|' .. os.subarch()] or hosts[os.subhost()])
-            and (_pattern:trim() == "" or (plat .. '|' .. arch):find('^' .. _pattern .. '$') or plat:find('^' .. _pattern .. '$')) then
-                result = _script
-                break
-            end
-        end
-
-        -- get generic script
-        result = result or script["__generic__"] or generic
-    end
-
-    -- only generic script
-    result = result or generic
+    local result = select_script(script, {plat = self:plat(), arch = self:arch()}) or generic
 
     -- imports some modules first
     if result and result ~= generic then
@@ -2745,6 +2600,18 @@ function _instance:check_sizeof(typename, opt)
     return sandbox_module.import("lib.detect.check_sizeof", {anonymous = true})(typename, opt)
 end
 
+-- check the endianness of compiler
+--
+-- @param opt       the argument options, e.g. {includes = "xxx.h", configs = {defines = ""}}
+--
+-- @return          the type size
+--
+function _instance:check_bigendian(opt)
+  opt = opt or {}
+  opt.target = self:_checked_target()
+  return sandbox_module.import("lib.detect.check_bigendian", {anonymous = true})(opt)
+end
+
 -- check the given c snippets?
 --
 -- @param snippets  the snippets
@@ -2880,6 +2747,9 @@ function target.apis()
             -- target.remove_xxx
         ,   "target.remove_files"
         ,   "target.remove_headerfiles"
+        ,   "target.remove_configfiles"
+        ,   "target.remove_installfiles"
+        ,   "target.remove_extrafiles"
         }
     ,   script =
         {
@@ -2931,8 +2801,6 @@ end
 
 -- get the filename from the given target name and kind
 function target.filename(targetname, targetkind, opt)
-
-    -- check
     opt = opt or {}
     assert(targetname and targetkind)
 

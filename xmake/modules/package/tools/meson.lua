@@ -319,13 +319,13 @@ function _get_configs(package, configs, opt)
     -- add runtimes flags
     if package:is_plat("windows") then
         if package:has_runtime("MT") then
-            table.insert(configs, "-Db_vscrt=MT")
+            table.insert(configs, "-Db_vscrt=mt")
         elseif package:has_runtime("MTd") then
-            table.insert(configs, "-Db_vscrt=MTd")
+            table.insert(configs, "-Db_vscrt=mtd")
         elseif package:has_runtime("MD") then
-            table.insert(configs, "-Db_vscrt=MD")
+            table.insert(configs, "-Db_vscrt=md")
         elseif package:has_runtime("MDd") then
-            table.insert(configs, "-Db_vscrt=MDd")
+            table.insert(configs, "-Db_vscrt=mdd")
         end
     end
 
@@ -347,7 +347,7 @@ end
 
 -- get msvc
 function _get_msvc(package)
-    local msvc = toolchain.load("msvc", {plat = package:plat(), arch = package:arch()})
+    local msvc = package:toolchain("msvc")
     assert(msvc:check(), "vs not found!") -- we need to check vs envs if it has been not checked yet
     return msvc
 end
@@ -506,20 +506,17 @@ end
 -- install package
 function install(package, configs, opt)
 
-    -- generate build files
+    -- do build
     opt = opt or {}
-    generate(package, configs, opt)
+    build(package, configs, opt)
 
     -- configure install
     local buildir = _get_buildir(package, opt)
     local argv = {"install", "-C", buildir}
-    if option.get("verbose") then
-        table.insert(argv, "-v")
-    end
 
-    -- do build and install
+    -- do install
     local meson = assert(find_tool("meson"), "meson not found!")
-    os.vrunv(meson.program, {"install", "-C", buildir}, {envs = opt.envs or buildenvs(package, opt)})
+    os.vrunv(meson.program, argv, {envs = opt.envs or buildenvs(package, opt)})
 
     -- fix static libname on windows
     if package:is_plat("windows") and not package:config("shared") then

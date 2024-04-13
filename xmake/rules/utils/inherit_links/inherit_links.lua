@@ -43,10 +43,18 @@ function _add_export_value(target, name, value)
             end
         end
     end
+    local extraconf = target:extraconf(name, value)
     if has_private then
-        target:add(name, value, {public = true})
+        target:add(name, value, table.join(extraconf or {}, {public = true}))
     else
-        target:add(name, value, {interface = true})
+        target:add(name, value, table.join(extraconf or {}, {interface = true}))
+    end
+end
+
+-- export values as public/interface in target
+function _add_export_values(target, name, values)
+    for _, value in ipairs(values) do
+        _add_export_value(target, name, value)
     end
 end
 
@@ -57,9 +65,8 @@ function main(target)
         return
     end
 
-    -- export links and linkdirs
-    local targetkind = target:kind()
-    if targetkind == "shared" or targetkind == "static" then
+    -- export target links and linkdirs
+    if target:is_shared() or target:is_static() then
         local targetfile = target:targetfile()
 
         -- rust maybe will disable inherit links, only inherit linkdirs
@@ -78,30 +85,29 @@ function main(target)
             -- we need to add includedirs to support import modules for golang
             _add_export_value(target, "includedirs", path.directory(targetfile))
         end
+    end
 
-        -- we export all links and linkdirs in self/packages/options to the parent target by default
-        --
-        -- @note we only export links for static target,
-        -- and we need to pass `{public = true}` to add_packages/add_links/... to export it if want to export links for shared target
-        --
-        if target:data("inherit.links.exportlinks") ~= false then
-            if targetkind == "static" then
-                for _, name in ipairs({"rpathdirs", "frameworkdirs", "frameworks", "linkdirs", "links", "syslinks"}) do
-                    local values = _get_values_from_target(target, name)
-                    if values and #values > 0 then
-                        target:add(name, values, {public = true})
-                    end
+    -- we export all links and linkdirs in self/packages/options to the parent target by default
+    --
+    -- @note we only export links for static target,
+    -- and we need to pass `{public = true}` to add_packages/add_links/... to export it if want to export links for shared target
+    --
+    if target:data("inherit.links.exportlinks") ~= false then
+        if target:is_static() or target:is_object() then
+            for _, name in ipairs({"rpathdirs", "frameworkdirs", "frameworks", "linkdirs", "links", "syslinks", "ldflags", "shflags"}) do
+                local values = _get_values_from_target(target, name)
+                if values and #values > 0 then
+                    _add_export_values(target, name, values)
                 end
             end
         end
     end
 
     -- export rpathdirs for all shared library
-    if targetkind == "binary" then
+    if target:is_binary() then
         local targetdir = target:targetdir()
-        for _, dep in ipairs(target:orderdeps()) do
-            local depinherit = target:extraconf("deps", dep:name(), "inherit")
-            if dep:kind() == "shared" and (depinherit == nil or depinherit) then
+        for _, dep in ipairs(target:orderdeps({inherit = true})) do
+            if dep:kind() == "shared" then
                 local rpathdir = "@loader_path"
                 local subdir = path.relative(path.directory(dep:targetfile()), targetdir)
                 if subdir and subdir ~= '.' then
@@ -112,3 +118,4 @@ function main(target)
         end
     end
 end
+

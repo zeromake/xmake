@@ -23,21 +23,36 @@ import("core.base.option")
 import("core.project.config")
 import("core.tool.linker")
 import("core.tool.compiler")
+import("core.tool.toolchain")
 import("core.cache.memcache")
 import("lib.detect.find_tool")
 
 -- translate paths
-function _translate_paths(package, paths)
-    if paths and is_host("windows") and (package:is_plat("mingw") or package:is_plat("msys") or package:is_plat("cygwin")) then
+function _translate_paths(paths)
+    if paths and is_host("windows") then
         if type(paths) == "string" then
-            return (paths:gsub("\\", "/"))
+            return path.unix(paths)
         elseif type(paths) == "table" then
             local result = {}
             for _, p in ipairs(paths) do
-                table.insert(result, (p:gsub("\\", "/")))
+                table.insert(result, path.unix(p))
             end
             return result
         end
+    end
+    return paths
+end
+
+-- translate cygwin paths
+function _translate_cygwin_paths(paths)
+    if type(paths) == "string" then
+        return path.cygwin(paths)
+    elseif type(paths) == "table" then
+        local result = {}
+        for _, p in ipairs(paths) do
+            table.insert(result, path.cygwin(p))
+        end
+        return result
     end
     return paths
 end
@@ -46,9 +61,21 @@ end
 function _translate_windows_bin_path(bin_path)
     if bin_path then
         local argv = os.argv(bin_path)
-        argv[1] = argv[1]:gsub("\\", "/") .. ".exe"
+        argv[1] = path.unix(argv[1]) .. ".exe"
         return os.args(argv)
     end
+end
+
+-- get msvc
+function _get_msvc(package)
+    local msvc = package:toolchain("msvc")
+    assert(msvc:check(), "vs not found!") -- we need to check vs envs if it has been not checked yet
+    return msvc
+end
+
+-- get msvc run environments
+function _get_msvc_runenvs(package)
+    return os.joinenvs(_get_msvc(package):runenvs())
 end
 
 -- map compiler flags
@@ -96,7 +123,7 @@ function _get_configs(package, configs)
 
     -- add prefix
     local configs = configs or {}
-    table.insert(configs, "--prefix=" .. _translate_paths(package, package:installdir()))
+    table.insert(configs, "--prefix=" .. _translate_paths(package:installdir()))
 
     -- add host for cross-complation
     if not configs.host and _is_cross_compilation(package) then
@@ -161,8 +188,8 @@ function _get_cflags_from_packagedeps(package, opt)
             local fetchinfo = dep:fetch({external = false})
             if fetchinfo then
                 table.join2(result, _map_compflags(package, "cxx", "define", fetchinfo.defines))
-                table.join2(result, _translate_paths(package, _map_compflags(package, "cxx", "includedir", fetchinfo.includedirs)))
-                table.join2(result, _translate_paths(package, _map_compflags(package, "cxx", "sysincludedir", fetchinfo.sysincludedirs)))
+                table.join2(result, _translate_paths(_map_compflags(package, "cxx", "includedir", fetchinfo.includedirs)))
+                table.join2(result, _translate_paths(_map_compflags(package, "cxx", "sysincludedir", fetchinfo.sysincludedirs)))
             end
         end
     end
@@ -177,9 +204,9 @@ function _get_ldflags_from_packagedeps(package, opt)
         if dep then
             local fetchinfo = dep:fetch({external = false})
             if fetchinfo then
-                table.join2(result, _translate_paths(package, _map_linkflags(package, "binary", {"cxx"}, "linkdir", fetchinfo.linkdirs)))
+                table.join2(result, _translate_paths(_map_linkflags(package, "binary", {"cxx"}, "linkdir", fetchinfo.linkdirs)))
                 table.join2(result, _map_linkflags(package, "binary", {"cxx"}, "link", fetchinfo.links))
-                table.join2(result, _translate_paths(package, _map_linkflags(package, "binary", {"cxx"}, "syslink", fetchinfo.syslinks)))
+                table.join2(result, _translate_paths(_map_linkflags(package, "binary", {"cxx"}, "syslink", fetchinfo.syslinks)))
                 table.join2(result, _map_linkflags(package, "binary", {"cxx"}, "framework", fetchinfo.frameworks))
             end
         end
@@ -216,11 +243,6 @@ function buildenvs(package, opt)
         table.join2(cxxflags, _get_cflags_from_packagedeps(package, opt))
         table.join2(cppflags, _get_cflags_from_packagedeps(package, opt))
         table.join2(ldflags,  _get_ldflags_from_packagedeps(package, opt))
-        envs.CFLAGS    = table.concat(cflags, ' ')
-        envs.CXXFLAGS  = table.concat(cxxflags, ' ')
-        envs.CPPFLAGS  = table.concat(cppflags, ' ')
-        envs.ASFLAGS   = table.concat(asflags, ' ')
-        envs.LDFLAGS   = table.concat(ldflags, ' ')
     else
         cross = true
         cppflags = {}
@@ -287,18 +309,26 @@ function buildenvs(package, opt)
         table.join2(cxxflags, package:_generate_sanitizer_configs("address", "cxx").cxxflags)
         table.join2(ldflags, package:_generate_sanitizer_configs("address").ldflags)
     end
-    envs.CFLAGS    = table.concat(cflags, ' ')
-    envs.CXXFLAGS  = table.concat(cxxflags, ' ')
-    envs.CPPFLAGS  = table.concat(cppflags, ' ')
-    envs.ASFLAGS   = table.concat(asflags, ' ')
+    if cflags then
+        envs.CFLAGS    = table.concat(_translate_paths(cflags), ' ')
+    end
+    if cxxflags then
+        envs.CXXFLAGS  = table.concat(_translate_paths(cxxflags), ' ')
+    end
+    if cppflags then
+        envs.CPPFLAGS  = table.concat(_translate_paths(cppflags), ' ')
+    end
+    if asflags then
+        envs.ASFLAGS   = table.concat(_translate_paths(asflags), ' ')
+    end
     if arflags then
-        envs.ARFLAGS   = table.concat(arflags, ' ')
+        envs.ARFLAGS   = table.concat(_translate_paths(arflags), ' ')
     end
     if ldflags then
-        envs.LDFLAGS   = table.concat(ldflags, ' ')
+        envs.LDFLAGS   = table.concat(_translate_paths(ldflags), ' ')
     end
     if shflags then
-        envs.SHFLAGS   = table.concat(shflags, ' ')
+        envs.SHFLAGS   = table.concat(_translate_paths(shflags), ' ')
     end
 
     -- cross-compilation? pass the full build environments
@@ -315,20 +345,17 @@ function buildenvs(package, opt)
                     envs.LD = path.join(path.directory(ld), is_host("windows") and "ld" or "i686-w64-mingw32-ld")
                 end
             end
-            if is_host("windows") then
-                envs.CC       = _translate_windows_bin_path(envs.CC)
-                envs.AS       = _translate_windows_bin_path(envs.AS)
-                envs.AR       = _translate_windows_bin_path(envs.AR)
-                envs.LD       = _translate_windows_bin_path(envs.LD)
-                envs.LDSHARED = _translate_windows_bin_path(envs.LDSHARED)
-                envs.CPP      = _translate_windows_bin_path(envs.CPP)
-                envs.RANLIB   = _translate_windows_bin_path(envs.RANLIB)
+        else
+            if package:is_plat("macosx") then
+                -- force to apply shflags on macosx https://gmplib.org/manual/Known-Build-Problems
+                envs.CC = envs.CC .. " -arch " .. package:arch()
             end
-        elseif package:is_plat("cross") or package:has_tool("ar", "ar", "emar") then
-            -- only for cross-toolchain
-            envs.CXX = package:build_getenv("cxx")
-            if not envs.ARFLAGS or envs.ARFLAGS == "" then
-                envs.ARFLAGS = "-cr"
+            if package:is_plat("cross") or package:has_tool("ar", "ar", "emar") then
+                -- only for cross-toolchain
+                envs.CXX = package:build_getenv("cxx")
+                if not envs.ARFLAGS or envs.ARFLAGS == "" then
+                    envs.ARFLAGS = "-cr"
+                end
             end
         end
 
@@ -364,6 +391,18 @@ function buildenvs(package, opt)
             name = name:gsub("gcc%-", "g++-")
             envs.CXX = dir and path.join(dir, name) or name
         end
+    elseif package:is_plat("windows") and not package:config("toolchains") then
+        envs.PATH = os.getenv("PATH") -- we need to reserve PATH on msys2
+        envs = os.joinenvs(envs, _get_msvc(package):runenvs())
+    end
+    if is_host("windows") then
+        envs.CC       = _translate_windows_bin_path(envs.CC)
+        envs.AS       = _translate_windows_bin_path(envs.AS)
+        envs.AR       = _translate_windows_bin_path(envs.AR)
+        envs.LD       = _translate_windows_bin_path(envs.LD)
+        envs.LDSHARED = _translate_windows_bin_path(envs.LDSHARED)
+        envs.CPP      = _translate_windows_bin_path(envs.CPP)
+        envs.RANLIB   = _translate_windows_bin_path(envs.RANLIB)
     end
     local ACLOCAL_PATH = {}
     local PKG_CONFIG_PATH = {}
@@ -384,8 +423,16 @@ function buildenvs(package, opt)
             table.insert(ACLOCAL_PATH, aclocal)
         end
     end
-    envs.ACLOCAL_PATH    = path.joinenv(ACLOCAL_PATH)
-    envs.PKG_CONFIG_PATH = path.joinenv(PKG_CONFIG_PATH)
+    envs.ACLOCAL_PATH = path.joinenv(ACLOCAL_PATH)
+    -- fix PKG_CONFIG_PATH for windows/msys2
+    -- @see https://github.com/xmake-io/xmake-repo/issues/3442
+    if package:is_plat("windows") then
+        -- pkg-config can only support for unix path and env seperator on msys/cygwin
+        PKG_CONFIG_PATH = _translate_cygwin_paths(PKG_CONFIG_PATH)
+        envs.PKG_CONFIG_PATH = path.joinenv(PKG_CONFIG_PATH, ":")
+    else
+        envs.PKG_CONFIG_PATH = path.joinenv(PKG_CONFIG_PATH)
+    end
     return envs
 end
 
@@ -468,7 +515,13 @@ function make(package, argv, opt)
         end
     end
     assert(program, "make not found!")
-    os.vrunv(program, argv)
+
+    if package:is_plat("windows") then
+        local envs = opt.envs or buildenvs(package, opt)
+        os.vrunv(program, argv, {envs = envs})
+    else
+        os.vrunv(program, argv)
+    end
 end
 
 -- build package
@@ -525,4 +578,3 @@ function install(package, configs, opt)
     end
     make(package, argv, opt)
 end
-

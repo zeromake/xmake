@@ -20,6 +20,7 @@
 
 -- imports
 import("core.base.option")
+import("core.base.semver")
 import("core.tool.toolchain")
 import("core.project.config")
 import("core.tool.linker")
@@ -86,7 +87,7 @@ end
 
 -- get msvc
 function _get_msvc(package)
-    local msvc = toolchain.load("msvc", {plat = package:plat(), arch = package:arch()})
+    local msvc = package:toolchain("msvc")
     assert(msvc:check(), "vs not found!") -- we need to check vs envs if it has been not checked yet
     return msvc
 end
@@ -168,7 +169,7 @@ function _get_cflags(package, opt)
     end
     table.join2(result, _get_cflags_from_packagedeps(package, opt))
     if #result > 0 then
-        return os.args(result)
+        return os.args(_translate_paths(result))
     end
 end
 
@@ -199,7 +200,7 @@ function _get_cxxflags(package, opt)
     end
     table.join2(result, _get_cflags_from_packagedeps(package, opt))
     if #result > 0 then
-        return os.args(result)
+        return os.args(_translate_paths(result))
     end
 end
 
@@ -218,7 +219,7 @@ function _get_asflags(package, opt)
         table.join2(result, opt.asflags)
     end
     if #result > 0 then
-        return os.args(result)
+        return os.args(_translate_paths(result))
     end
 end
 
@@ -244,7 +245,7 @@ function _get_ldflags(package, opt)
         table.join2(result, opt.ldflags)
     end
     if #result > 0 then
-        return os.args(result)
+        return os.args(_translate_paths(result))
     end
 end
 
@@ -270,8 +271,21 @@ function _get_shflags(package, opt)
         table.join2(result, opt.shflags)
     end
     if #result > 0 then
-        return os.args(result)
+        return os.args(_translate_paths(result))
     end
+end
+
+-- get cmake version
+function _get_cmake_version()
+    local cmake_version = _g.cmake_version
+    if not cmake_version then
+        local cmake = find_tool("cmake", {version = true})
+        if cmake and cmake.version then
+            cmake_version = semver.new(cmake.version)
+        end
+        _g.cmake_version = cmake_version
+    end
+    return cmake_version
 end
 
 -- get vs toolset
@@ -282,6 +296,14 @@ function _get_vs_toolset(package)
         local verinfo = vs_toolset:split('%.')
         if #verinfo >= 2 then
             toolset_ver = "v" .. verinfo[1] .. (verinfo[2]:sub(1, 1) or "0")
+        end
+    end
+    -- cmake does not support vs toolset v144 below 3.29.0, we can only use v143
+    -- @see https://github.com/xmake-io/xmake/issues/4772
+    if toolset_ver and toolset_ver >= "v144" then
+        local cmake_version = _get_cmake_version()
+        if cmake_version and cmake_version:le("3.29.0") then
+            toolset_ver = "v143"
         end
     end
     return toolset_ver
@@ -349,6 +371,15 @@ function _get_configs_for_windows(package, configs, opt)
             table.insert(configs, "-DCMAKE_GENERATOR_TOOLSET=" .. vs_toolset)
         end
     end
+
+    -- use clang-cl
+    if package:has_tool("cc", "clang_cl") then
+        table.insert(configs, "-DCMAKE_C_COMPILER=" .. _translate_bin_path(package:build_getenv("cc")))
+    end
+    if package:has_tool("cxx", "clang_cl") then
+        table.insert(configs, "-DCMAKE_CXX_COMPILER=" .. _translate_bin_path(package:build_getenv("cxx")))
+    end
+
     -- we maybe need patch `cmake_policy(SET CMP0091 NEW)` to enable this argument for some packages
     -- @see https://cmake.org/cmake/help/latest/policy/CMP0091.html#policy:CMP0091
     -- https://github.com/xmake-io/xmake-repo/pull/303
@@ -382,23 +413,25 @@ function _get_configs_for_windows(package, configs, opt)
 end
 
 -- get configs for android
+-- https://developer.android.google.cn/ndk/guides/cmake
 function _get_configs_for_android(package, configs, opt)
-
-    -- https://developer.android.google.cn/ndk/guides/cmake
+    opt = opt or {}
     local ndk = get_config("ndk")
     if ndk and os.isdir(ndk) then
         local ndk_sdkver = get_config("ndk_sdkver")
-        local ndk_cxxstl = get_config("ndk_cxxstl")
         table.insert(configs, "-DCMAKE_TOOLCHAIN_FILE=" .. path.join(ndk, "build/cmake/android.toolchain.cmake"))
+        table.insert(configs, "-DANDROID_USE_LEGACY_TOOLCHAIN_FILE=OFF")
         table.insert(configs, "-DANDROID_ABI=" .. package:arch())
         if ndk_sdkver then
             table.insert(configs, "-DANDROID_PLATFORM=android-" .. ndk_sdkver)
             table.insert(configs, "-DANDROID_NATIVE_API_LEVEL=" .. ndk_sdkver)
         end
-        if ndk_cxxstl then
-            table.insert(configs, "-DANDROID_STL=" .. ndk_cxxstl)
+        -- https://cmake.org/cmake/help/latest/variable/CMAKE_ANDROID_STL_TYPE.html
+        local runtime = package:runtimes()
+        if runtime then
+            table.insert(configs, "-DCMAKE_ANDROID_STL_TYPE=" .. runtime)
         end
-        if is_host("windows") then
+        if is_host("windows") and opt.cmake_generator ~= "Ninja" then
             local make = path.join(ndk, "prebuilt", "windows-x86_64", "bin", "make.exe")
             if os.isfile(make) then
                 table.insert(configs, "-DCMAKE_MAKE_PROGRAM=" .. make)
@@ -473,9 +506,9 @@ function _get_configs_for_mingw(package, configs, opt)
     -- Avoid cmake to add the flags -search_paths_first and -headerpad_max_install_names on macOS
     envs.HAVE_FLAG_SEARCH_PATHS_FIRST = "0"
     -- CMAKE_MAKE_PROGRAM may be required for some CMakeLists.txt (libcurl)
-    if is_subhost("windows") then
+    if is_subhost("windows") and opt.cmake_generator ~= "Ninja" then
         local mingw = assert(package:build_getenv("mingw") or package:build_getenv("sdk"), "mingw not found!")
-        envs.CMAKE_MAKE_PROGRAM = path.join(mingw, "bin", "mingw32-make.exe")
+        envs.CMAKE_MAKE_PROGRAM = _translate_bin_path(path.join(mingw, "bin", "mingw32-make.exe"))
     end
     if opt.cmake_generator == "Ninja" then
         envs.CMAKE_MAKE_PROGRAM = "ninja"
@@ -485,6 +518,7 @@ end
 
 -- get configs for wasm
 function _get_configs_for_wasm(package, configs, opt)
+    opt = opt or {}
     local emsdk = find_emsdk()
     assert(emsdk and emsdk.emscripten, "emscripten not found!")
     local emscripten_cmakefile = find_file("Emscripten.cmake", path.join(emsdk.emscripten, "cmake/Modules/Platform"))
@@ -839,7 +873,6 @@ function _build_for_ninja(package, configs, opt)
     opt = opt or {}
     ninja.build(package, {}, {envs = opt.envs or buildenvs(package, opt),
         jobs = opt.jobs,
-        buildir = opt.buildir,
         target = opt.target})
 end
 
@@ -924,7 +957,6 @@ function _install_for_ninja(package, configs, opt)
     opt = opt or {}
     ninja.install(package, {}, {envs = opt.envs or buildenvs(package, opt),
         jobs = opt.jobs,
-        buildir = opt.buildir,
         target = opt.target})
 end
 
@@ -941,22 +973,39 @@ function _install_for_cmakebuild(package, configs, opt)
     os.vrunv(cmake.program, {"--install", os.curdir()})
 end
 
+-- get cmake generator
+function _get_cmake_generator(package, opt)
+    opt = opt or {}
+    local cmake_generator = opt.cmake_generator
+    if not cmake_generator then
+        if project.policy("package.cmake_generator.ninja") then
+            cmake_generator = "Ninja"
+        end
+        if not cmake_generator then
+            if package:has_tool("cc", "clang_cl") or package:has_tool("cxx", "clang_cl") then
+                cmake_generator = "Ninja"
+            end
+        end
+        local cmake_generator_env = os.getenv("CMAKE_GENERATOR")
+        if not cmake_generator and cmake_generator_env then
+            cmake_generator = cmake_generator_env
+        end
+        if cmake_generator then
+            opt.cmake_generator = cmake_generator
+        end
+    end
+    return cmake_generator
+end
+
 -- build package
 function build(package, configs, opt)
-
-    -- init options
     opt = opt or {}
+    local cmake_generator = _get_cmake_generator(package, opt)
 
     -- enter build directory
     local buildir = opt.buildir or package:buildir()
     os.mkdir(path.join(buildir, "install"))
     local oldir = os.cd(buildir)
-
-    -- exists $CMAKE_GENERATOR? use it
-    local cmake_generator_env = os.getenv("CMAKE_GENERATOR")
-    if not opt.cmake_generator and cmake_generator_env then
-        opt.cmake_generator = cmake_generator_env
-    end
 
     -- pass configurations
     local argv = {}
@@ -977,7 +1026,6 @@ function build(package, configs, opt)
     os.vrunv(cmake.program, argv, {envs = opt.envs or buildenvs(package, opt)})
 
     -- do build
-    local cmake_generator = opt.cmake_generator
     if opt.cmake_build then
         _build_for_cmakebuild(package, configs, opt)
     elseif cmake_generator then
@@ -1002,12 +1050,8 @@ end
 
 -- install package
 function install(package, configs, opt)
-
-    -- init options
     opt = opt or {}
-    if (not opt.cmake_generator) and project.policy("package.cmake_generator.ninja") then
-        opt.cmake_generator = "Ninja"
-    end
+    local cmake_generator = _get_cmake_generator(package, opt)
 
     -- enter build directory
     local buildir = opt.buildir or package:buildir()
@@ -1033,7 +1077,6 @@ function install(package, configs, opt)
     os.vrunv(cmake.program, argv, {envs = opt.envs or buildenvs(package, opt)})
 
     -- do build and install
-    local cmake_generator = opt.cmake_generator
     if opt.cmake_build then
         _install_for_cmakebuild(package, configs, opt)
     elseif cmake_generator then
@@ -1062,3 +1105,4 @@ function install(package, configs, opt)
     end
     os.cd(oldir)
 end
+

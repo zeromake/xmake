@@ -34,9 +34,12 @@ local option         = require("base/option")
 local hashset        = require("base/hashset")
 local scopeinfo      = require("base/scopeinfo")
 local interpreter    = require("base/interpreter")
+local select_script  = require("base/private/select_script")
+local is_cross       = require("base/private/is_cross")
 local memcache       = require("cache/memcache")
 local toolchain      = require("tool/toolchain")
 local compiler       = require("tool/compiler")
+local linker         = require("tool/linker")
 local sandbox        = require("sandbox/sandbox")
 local config         = require("project/config")
 local policy         = require("project/policy")
@@ -683,27 +686,7 @@ end
 
 -- is cross-compilation?
 function _instance:is_cross()
-    if os.host() == "windows" then
-        local host_arch = os.arch()
-        if self:is_plat("windows") then
-            -- maybe cross-compilation for arm64 on x86/x64
-            if (host_arch == "x86" or host_arch == "x64") and self:is_arch("arm64") then
-                return true
-            -- maybe cross-compilation for x86/64 on arm64
-            elseif host_arch == "arm64" and not self:is_arch("arm64") then
-                return true
-            end
-            return false
-        elseif self:is_plat("mingw") then
-            return false
-        end
-    end
-    if not self:is_plat(os.host()) and not self:is_plat(os.subhost()) then
-        return true
-    end
-    if not self:is_arch(os.arch()) and not self:is_arch(os.subarch()) then
-        return true
-    end
+    return is_cross(self:plat(), self:arch())
 end
 
 -- get the filelock of the whole package directory
@@ -767,7 +750,18 @@ function _instance:cachedir()
     if not cachedir then
         cachedir = self:get("cachedir")
         if not cachedir then
-            local name = self:name():lower():gsub("::", "_")
+            -- we need to use displayname (with package id) to avoid
+            -- multiple processes accessing it at the same time.
+            --
+            -- @see https://github.com/libbpf/libbpf-bootstrap/pull/259#issuecomment-1994914188
+            --
+            -- e.g.
+            --
+            -- lock elfutils#1 /home/runner/.xmake/cache/packages/2403/e/elfutils/0.189
+            -- lock elfutils /home/runner/.xmake/cache/packages/2403/e/elfutils/0.189
+            -- package(elfutils) is being accessed by other processes, please wait!
+            --
+            local name = self:displayname():lower():gsub("::", "_"):gsub("#", "_")
             local version_str = self:version_str()
             if self:is_thirdparty() then
                 -- strip `>= <=`
@@ -986,9 +980,12 @@ function _instance:_rawenvs()
     local envs = self._RAWENVS
     if not envs then
         envs = {}
+
+        -- add bin PATH
         if self:is_binary() or self:is_plat("windows", "mingw") then -- bin/*.dll for windows
             envs.PATH = {"bin"}
         end
+
         -- add LD_LIBRARY_PATH to load *.so directory
         if os.host() ~= "windows" and self:is_plat(os.host()) and self:is_arch(os.arch()) then
             envs.LD_LIBRARY_PATH = {"lib"}
@@ -1172,6 +1169,9 @@ function _instance:toolchain(name)
         end
         self:_memcache():set("toolchains_map", toolchains_map)
     end
+    if not toolchains_map[name] then
+        toolchains_map[name] = toolchain.load(name, {plat = self:plat(), arch = self:arch()})
+    end
     return toolchains_map[name]
 end
 
@@ -1285,7 +1285,6 @@ function _instance:_versions_list()
         local versions = table.wrap(self:get("versions"))
         local versionfiles = self:get("versionfiles")
         if versionfiles then
-            utils.dump(versionfiles)
             for _, versionfile in ipairs(table.wrap(versionfiles)) do
                 if not os.isfile(versionfile) then
                     versionfile = path.join(self:scriptdir(), versionfile)
@@ -1662,48 +1661,7 @@ function _instance:script(name, generic)
 
     -- get script
     local script = self:get(name)
-    local result = nil
-    if type(script) == "function" then
-        result = script
-    elseif type(script) == "table" then
-
-        -- get plat and arch
-        local plat = self:plat() or ""
-        local arch = self:arch() or ""
-
-        -- match pattern
-        --
-        -- `@linux`
-        -- `@linux|x86_64`
-        -- `@macosx,linux`
-        -- `android@macosx,linux`
-        -- `android|armeabi-v7a@macosx,linux`
-        -- `android|armeabi-v7a@macosx,linux|x86_64`
-        -- `android|armeabi-v7a@linux|x86_64`
-        --
-        for _pattern, _script in pairs(script) do
-            local hosts = {}
-            local hosts_spec = false
-            _pattern = _pattern:gsub("@(.+)", function (v)
-                for _, host in ipairs(v:split(',')) do
-                    hosts[host] = true
-                    hosts_spec = true
-                end
-                return ""
-            end)
-            if not _pattern:startswith("__") and (not hosts_spec or hosts[os.subhost() .. '|' .. os.subarch()] or hosts[os.subhost()])
-            and (_pattern:trim() == "" or (plat .. '|' .. arch):find('^' .. _pattern .. '$') or plat:find('^' .. _pattern .. '$')) then
-                result = _script
-                break
-            end
-        end
-
-        -- get generic script
-        result = result or script["__generic__"] or generic
-    end
-
-    -- only generic script
-    result = result or generic
+    local result = select_script(script, {plat = self:plat(), arch = self:arch()}) or generic
 
     -- imports some modules first
     if result and result ~= generic then
@@ -1773,10 +1731,13 @@ function _instance:_fetch_library(opt)
     local fetchinfo
     local on_fetch = self:script("fetch")
     if on_fetch then
-        fetchinfo = on_fetch(self, {force = opt.force,
-                                    system = opt.system,
-                                    external = opt.external,
-                                    require_version = opt.require_version})
+        -- we cannot fetch it from system if it's cross-compilation package
+        if not opt.system or (opt.system and not self:is_cross()) then
+            fetchinfo = on_fetch(self, {force = opt.force,
+                                        system = opt.system,
+                                        external = opt.external,
+                                        require_version = opt.require_version})
+        end
         if fetchinfo and opt.require_version and opt.require_version:find(".", 1, true) then
             local version = fetchinfo.version
             if not (version and (version == opt.require_version or semver.satisfies(version, opt.require_version))) then
@@ -1989,8 +1950,8 @@ function _instance:fetch(opt)
             end
         end
 
-        -- fetch it from the system and external package sources (disabled for cross-compilation)
-        if not fetchinfo and system ~= false and not self:is_cross() then
+        -- fetch it from the system and external package sources
+        if not fetchinfo and system ~= false then
             fetchinfo = self:_fetch_library({system = true, require_version = require_ver, external = external, force = opt.force})
             if fetchinfo then
                 is_system = true
@@ -2057,6 +2018,12 @@ function _instance:fetch_librarydeps()
 end
 
 -- get the patches of the current version
+--
+-- @code
+-- add_patches("6.7.6", "https://cdn.kernel.org/pub/linux/kernel/v6.x/patch-6.7.6.xz",
+--    "a394326aa325f8a930a4ce33c69ba7b8b454aef1107a4d3c2a8ae12908615fc4", {reverse = true})
+-- @endcode
+--
 function _instance:patches()
     local patches = self._PATCHES
     if patches == nil then
@@ -2068,7 +2035,8 @@ function _instance:patches()
                 patches = {}
                 patchinfo = table.wrap(patchinfo)
                 for idx = 1, #patchinfo, 2 do
-                    table.insert(patches , {url = patchinfo[idx], sha256 = patchinfo[idx + 1]})
+                    local extra = self:extraconf("patches." .. version_str, patchinfo[idx])
+                    table.insert(patches , {url = patchinfo[idx], sha256 = patchinfo[idx + 1], extra = extra})
                 end
             else
                 -- match semver, e.g add_patches(">=1.0.0", url, sha256)
@@ -2077,7 +2045,8 @@ function _instance:patches()
                         patches = patches or {}
                         patchinfo = table.wrap(patchinfo)
                         for idx = 1, #patchinfo, 2 do
-                            table.insert(patches , {url = patchinfo[idx], sha256 = patchinfo[idx + 1]})
+                            local extra = self:extraconf("patches." .. range, patchinfo[idx])
+                            table.insert(patches , {url = patchinfo[idx], sha256 = patchinfo[idx + 1], extra = extra})
                         end
                     end
                 end
@@ -2303,27 +2272,34 @@ end
 function _instance:_generate_build_configs(configs, opt)
     opt = opt or {}
     configs = table.join(self:fetch_librarydeps(), configs)
-    if self:is_plat("windows") then
-        local ld = self:build_getenv("ld")
-        local runtimes = self:runtimes()
-        -- since we are ignoring the runtimes of the headeronly library,
-        -- we can only get the runtimes from the dependency library to detect the link.
-        if self:is_headeronly() and not runtimes and self:librarydeps() then
-            for _, dep in ipairs(self:librarydeps()) do
-                if dep:is_plat("windows") and dep:runtimes() then
-                    runtimes = dep:runtimes()
-                    break
-                end
+    -- since we are ignoring the runtimes of the headeronly library,
+    -- we can only get the runtimes from the dependency library to detect the link.
+    local runtimes = self:runtimes()
+    if self:is_headeronly() and not runtimes and self:librarydeps() then
+        for _, dep in ipairs(self:librarydeps()) do
+            if dep:is_plat("windows") and dep:runtimes() then
+                runtimes = dep:runtimes()
+                break
             end
         end
-        if runtimes and ld and path.basename(ld:lower()) == "link" then -- for msvc?
-            configs.cxflags = table.wrap(configs.cxflags)
-            table.insert(configs.cxflags, "/" .. runtimes)
-            if runtimes:startswith("MT") then
-                configs.ldflags = table.wrap(configs.ldflags)
-                table.insert(configs.ldflags, "-nodefaultlib:msvcrt.lib")
-            end
+    end
+    if runtimes then
+        local sourcekind = opt.sourcekind or "cxx"
+        local tool, name = self:tool("ld")
+        local linker, errors = linker.load("binary", sourcekind, {target = package})
+        if not linker then
+            os.raise(errors)
         end
+        local fake_target = {is_shared = function(_) return false end, 
+                             sourcekinds = function(_) return sourcekind end}
+        local compiler = self:compiler(sourcekind)
+        local cxflags = compiler:map_flags("runtime", runtimes, {target = fake_target})
+        configs.cxflags = table.wrap(configs.cxflags)
+        table.join2(configs.cxflags, cxflags)
+
+        local ldflags = linker:map_flags("runtime", runtimes, {target = fake_target})
+        configs.ldflags = table.wrap(configs.ldflags)
+        table.join2(configs.ldflags, ldflags)
     end
     if self:config("lto") then
         local configs_lto = self:_generate_lto_configs(opt.sourcekind or "cxx")
@@ -2487,6 +2463,19 @@ function _instance:has_features(features, opt)
     opt = opt or {}
     opt.target = self
     return sandbox_module.import("core.tool.compiler", {anonymous = true}).has_features(features, opt)
+end
+
+-- check the size of type
+--
+-- @param typename  the typename
+-- @param opt       the argument options, e.g. {includes = "xxx.h", configs = {defines = ""}}
+--
+-- @return          the type size
+--
+function _instance:check_sizeof(typename, opt)
+    opt = opt or {}
+    opt.target = self
+    return sandbox_module.import("lib.detect.check_sizeof", {anonymous = true})(typename, opt)
 end
 
 -- check the given c snippets?

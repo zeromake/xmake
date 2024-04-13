@@ -185,6 +185,38 @@ function nf_vectorext(self, extension)
     return maps[extension]
 end
 
+-- has -static-libstdc++?
+function _has_static_libstdcxx(self)
+    local has_static_libstdcxx = _g._HAS_STATIC_LIBSTDCXX
+    if has_static_libstdcxx == nil then
+        if self:has_flags("-static-libstdc++ -Werror", "ldflags", {flagskey = "gcc_static_libstdcxx"}) then
+            has_static_libstdcxx = true
+        end
+        has_static_libstdcxx = has_static_libstdcxx or false
+        _g._HAS_STATIC_LIBSTDCXX = has_static_libstdcxx
+    end
+    return has_static_libstdcxx
+end
+
+-- make the runtime flag
+function nf_runtime(self, runtime, opt)
+    opt = opt or {}
+    local maps
+    local kind = self:kind()
+    if not self:is_plat("android") then -- we will set runtimes in android ndk toolchain
+        maps = maps or {}
+        if kind == "ld" or kind == "sh" then
+            local target = opt.target
+            if target and target.sourcekinds and table.contains(table.wrap(target:sourcekinds()), "cxx") then
+                if runtime:endswith("_static") and _has_static_libstdcxx(self) then
+                    maps["stdc++_static"] = "-static-libstdc++"
+                end
+            end
+        end
+    end
+    return maps and maps[runtime]
+end
+
 -- make the language flag
 function nf_language(self, stdname)
 
@@ -519,13 +551,14 @@ end
 -- maybe we need to use os.vrunv() to show link output when enable verbose information
 -- @see https://github.com/xmake-io/xmake/discussions/2916
 --
-function link(self, objectfiles, targetkind, targetfile, flags)
+function link(self, objectfiles, targetkind, targetfile, flags, opt)
+    opt = opt or {}
     os.mkdir(path.directory(targetfile))
     local program, argv = linkargv(self, objectfiles, targetkind, targetfile, flags)
     if option.get("verbose") then
-        os.execv(program, argv, {envs = self:runenvs()})
+        os.execv(program, argv, {envs = self:runenvs(), shell = opt.shell})
     else
-        os.vrunv(program, argv, {envs = self:runenvs()})
+        os.vrunv(program, argv, {envs = self:runenvs(), shell = opt.shell})
     end
 end
 
@@ -542,6 +575,12 @@ function _has_color_diagnostics(self)
                 -- for clang
                 elseif self:has_flags("-fcolor-diagnostics", "cxflags") then
                     colors_diagnostics = "-fcolor-diagnostics"
+                end
+
+                -- enable color output for windows, @see https://github.com/xmake-io/xmake-vscode/discussions/260
+                if colors_diagnostics and self:name() == "clang" and is_host("windows") and
+                    self:has_flags("-fansi-escape-codes", "cxflags") then
+                    colors_diagnostics = table.join(colors_diagnostics, "-fansi-escape-codes")
                 end
             end
         end
@@ -705,17 +744,17 @@ function _compile(self, sourcefile, objectfile, compflags, opt)
     opt = opt or {}
     local program, argv = compargv(self, sourcefile, objectfile, compflags)
     local function _compile_fallback()
-        return os.iorunv(program, argv, {envs = self:runenvs()})
+        return os.iorunv(program, argv, {envs = self:runenvs(), shell = opt.shell})
     end
     local cppinfo
     if distcc_build_client.is_distccjob() and distcc_build_client.singleton():has_freejobs() then
         cppinfo = distcc_build_client.singleton():compile(program, argv, {envs = self:runenvs(),
             preprocess = _preprocess, compile = _compile_preprocessed_file, compile_fallback = _compile_fallback,
-            tool = self, remote = true})
+            tool = self, remote = true, shell = opt.shell})
     elseif build_cache.is_enabled(opt.target) and build_cache.is_supported(self:kind()) then
         cppinfo = build_cache.build(program, argv, {envs = self:runenvs(),
             preprocess = _preprocess, compile = _compile_preprocessed_file, compile_fallback = _compile_fallback,
-            tool = self})
+            tool = self, shell = opt.shell})
     end
     if cppinfo then
         return cppinfo.outdata, cppinfo.errdata

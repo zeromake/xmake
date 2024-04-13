@@ -269,8 +269,8 @@ function _run_tests(tests)
     local spent = os.mclock()
     print("running tests ...")
     local report = {passed = 0, total = #ordertests}
-    local jobs = tonumber(option.get("jobs") or "1")
-    runjobs("run_tests", function (index)
+    local jobs = tonumber(option.get("jobs")) or os.default_njob()
+    runjobs("run_tests", function (index, total, opt)
         local testinfo = ordertests[index]
         if testinfo then
             local target = testinfo.target
@@ -286,7 +286,7 @@ function _run_tests(tests)
             if option.get("verbose") then
                 progress_format = progress_format .. "${dim}"
             end
-            local progress = math.floor(index * 100 / #ordertests)
+            local progress = opt.progress:percent()
             local padding = maxwidth - #testinfo.name
             cprint(progress_format .. "%s%s .................................... " .. status_color .. "%s${clear} ${bright}%0.3fs",
                 progress, testinfo.name, (" "):rep(padding), passed and "passed" or "failed", spent / 1000)
